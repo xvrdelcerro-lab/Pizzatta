@@ -3,9 +3,10 @@
 import { useState, useEffect } from "react";
 
 export default function Home() {
-  const [currentTime, setCurrentTime] = useState(new Date());
+  const [currentTime, setCurrentTime] = useState<Date | null>(null);
 
   useEffect(() => {
+    setCurrentTime(new Date());
     const timer = setInterval(() => {
       setCurrentTime(new Date());
     }, 1000);
@@ -43,8 +44,8 @@ export default function Home() {
 
         {/* Date and Time Display */}
         <div className="text-center font-bold text-[#548235]">
-          <p className="text-xl tracking-wide">{formatDate(currentTime)}</p>
-          <p className="text-2xl mt-1">{formatTime(currentTime)}</p>
+          <p className="text-xl tracking-wide">{currentTime ? formatDate(currentTime) : "\u00A0"}</p>
+          <p className="text-2xl mt-1">{currentTime ? formatTime(currentTime) : "\u00A0"}</p>
         </div>
       </div>
 

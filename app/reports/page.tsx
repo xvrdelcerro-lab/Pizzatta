@@ -19,6 +19,7 @@ export default function ReportsPage() {
   const [production, setProduction] = useState<any[]>([]);
   const [sales, setSales] = useState<any[]>([]);
   const [inventory, setInventory] = useState<any[]>([]);
+  const [payments, setPayments] = useState<any[]>([]);
 
   const [selectedVendorId, setSelectedVendorId] = useState("");
   const [selectedCustomerId, setSelectedCustomerId] = useState("");
@@ -158,6 +159,26 @@ export default function ReportsPage() {
         };
       });
       setSales(salesList);
+
+      // Fetch payments received from customers (used by the Customer Statement report).
+      // Collection is optional - if it doesn't exist yet, getDocs simply returns an empty snapshot.
+      const paySnap = await getDocs(collection(db, "payments"));
+      const paymentsList = paySnap.docs.map(d => {
+        const data = d.data();
+        const extractedDate = formatDateField(data.date || data.dateTime || data.timestamp);
+        const custName = data.customer || data.customerName || data.client || "Walk-in Customer";
+        const amountVal = parseNumeric(data.amount || data.total || data.paidAmount || 0);
+        return {
+          id: d.id,
+          ...data,
+          date: extractedDate,
+          customerName: custName,
+          amount: amountVal,
+          method: data.method || data.paymentMethod || "",
+          note: data.note || data.notes || data.reference || data.description || ""
+        };
+      });
+      setPayments(paymentsList);
 
       // Fetch products catalog (name/category/code live here; price & stock are DERIVED below,
       // since Firestore product docs don't store them directly)
@@ -311,7 +332,7 @@ export default function ReportsPage() {
   };
 
   return (
-    <div className="min-h-screen bg-white p-8 flex justify-center">
+    <div className="bg-white p-8 flex justify-center">
       <style dangerouslySetInnerHTML={{ __html: `
         @media print {
           @page {
@@ -384,7 +405,7 @@ export default function ReportsPage() {
                 <Users size={20} />
               </div>
               <h3 className="font-bold text-gray-900 text-lg group-hover:text-[#548235] transition">Customers</h3>
-              <p className="text-xs text-gray-600 mt-1">List existing customers or view 1 single customer profile sheet.</p>
+              <p className="text-xs text-gray-600 mt-1">List existing customers, view a single profile sheet, or generate a customer statement with sales, payments, and balance.</p>
             </div>
             <div className="mt-4 flex items-center gap-1 text-xs font-bold text-[#548235]">Configure Report <ArrowRight size={14} /></div>
           </div>
@@ -473,6 +494,7 @@ export default function ReportsPage() {
           production={production}
           sales={sales}
           inventory={inventory}
+          payments={payments}
           selectedVendorId={selectedVendorId}
           setSelectedVendorId={setSelectedVendorId}
           selectedCustomerId={selectedCustomerId}
@@ -516,6 +538,7 @@ function ReportModal({
   production,
   sales,
   inventory,
+  payments,
   selectedVendorId,
   setSelectedVendorId,
   selectedCustomerId,
@@ -543,6 +566,57 @@ function ReportModal({
     ["vendors", "customers", "products"].includes(module) ? "list" : "date-range"
   );
 
+  // --- Customer Statement derived data ---
+  const statementCustomer = customers.find((c: any) => c.id === selectedCustomerId);
+  const statementCustomerName = statementCustomer
+    ? (statementCustomer.name || statementCustomer.customerName || statementCustomer.fullName || "")
+    : "";
+
+  const statementSales = module === "customers" && reportSubtype === "statement"
+    ? sales.filter((s: any) => {
+        const itemDate = s.date;
+        if (!itemDate) return false;
+        const inRange = (!startDate || itemDate >= startDate) && (!endDate || itemDate <= endDate);
+        return inRange && !!statementCustomerName && s.customerName === statementCustomerName;
+      })
+    : [];
+
+  const statementPayments = module === "customers" && reportSubtype === "statement"
+    ? payments.filter((p: any) => {
+        const itemDate = p.date;
+        if (!itemDate) return false;
+        const inRange = (!startDate || itemDate >= startDate) && (!endDate || itemDate <= endDate);
+        return inRange && !!statementCustomerName && p.customerName === statementCustomerName;
+      })
+    : [];
+
+  const statementTotalSales = statementSales.reduce((sum: number, s: any) => sum + parseNumeric(s.totalRevenue), 0);
+  const statementTotalPayments = statementPayments.reduce((sum: number, p: any) => sum + parseNumeric(p.amount), 0);
+  const statementTotalBalance = statementTotalSales - statementTotalPayments;
+
+  const statementTransactionsBase = [
+    ...statementSales.map((s: any) => ({
+      date: s.date,
+      type: "Sale",
+      description: s.itemsSummary || "Sale",
+      charge: parseNumeric(s.totalRevenue),
+      credit: 0
+    })),
+    ...statementPayments.map((p: any) => ({
+      date: p.date,
+      type: "Payment",
+      description: p.method || p.note || "Payment received",
+      charge: 0,
+      credit: parseNumeric(p.amount)
+    }))
+  ].sort((a, b) => String(a.date || "").localeCompare(String(b.date || "")));
+
+  let statementRunningTotal = 0;
+  const statementTransactions = statementTransactionsBase.map((t) => {
+    statementRunningTotal += t.charge - t.credit;
+    return { ...t, runningBalance: statementRunningTotal };
+  });
+
   return (
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50 overflow-y-auto" style={{ paddingLeft: 'calc(1rem + 3cm)' }}>
       <div 
@@ -564,6 +638,8 @@ function ReportModal({
                 <h2 className="text-2xl font-black uppercase tracking-wider text-gray-900">
                   {module === "inventory" 
                     ? (inventoryStockTab === "inventory" ? "Inventory Report" : "Stock Report") 
+                    : module === "customers" && reportSubtype === "statement"
+                    ? "Customer Statement"
                     : `${module} Report`}
                 </h2>
                 <p className="text-xs font-semibold text-gray-500 uppercase tracking-widest mt-0.5">Pizzatta Business Management System</p>
@@ -620,6 +696,9 @@ function ReportModal({
                   >
                     <option value="list">List of Existing ({module})</option>
                     <option value="single">Single Sheet Details</option>
+                    {module === "customers" && (
+                      <option value="statement">Customer Statement</option>
+                    )}
                   </select>
                 </div>
               )}
@@ -640,7 +719,7 @@ function ReportModal({
                 </div>
               )}
 
-              {reportSubtype === "single" && module === "customers" && (
+              {(reportSubtype === "single" || reportSubtype === "statement") && module === "customers" && (
                 <div className="flex-shrink-0">
                   <label className="block text-xs font-bold text-gray-700 mb-1">Select Customer</label>
                   <select
@@ -654,6 +733,29 @@ function ReportModal({
                     ))}
                   </select>
                 </div>
+              )}
+
+              {reportSubtype === "statement" && module === "customers" && (
+                <>
+                  <div className="flex-shrink-0">
+                    <label className="block text-xs font-bold text-gray-700 mb-1">Start Date</label>
+                    <input
+                      type="date"
+                      className="p-2 border border-[#548235] rounded bg-white text-sm text-gray-800"
+                      value={startDate}
+                      onChange={(e) => setStartDate(e.target.value)}
+                    />
+                  </div>
+                  <div className="flex-shrink-0">
+                    <label className="block text-xs font-bold text-gray-700 mb-1">End Date</label>
+                    <input
+                      type="date"
+                      className="p-2 border border-[#548235] rounded bg-white text-sm text-gray-800"
+                      value={endDate}
+                      onChange={(e) => setEndDate(e.target.value)}
+                    />
+                  </div>
+                </>
               )}
 
               {reportSubtype === "single" && module === "products" && (
@@ -908,6 +1010,25 @@ function ReportModal({
                 </span>
               </div>
             )}
+
+            {module === "customers" && reportSubtype === "statement" && (
+              <div className="flex-shrink-0 flex gap-3 ml-auto">
+                <div className="bg-white border-2 border-[#548235] px-4 py-2 rounded-lg text-right shadow-sm">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-gray-500 block">Total Sales</span>
+                  <span className="text-lg font-black text-[#548235]">${formatCurrency(statementTotalSales)}</span>
+                </div>
+                <div className="bg-white border-2 border-[#548235] px-4 py-2 rounded-lg text-right shadow-sm">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-gray-500 block">Total Payments</span>
+                  <span className="text-lg font-black text-[#548235]">${formatCurrency(statementTotalPayments)}</span>
+                </div>
+                <div className="bg-white border-2 border-[#548235] px-4 py-2 rounded-lg text-right shadow-sm">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-gray-500 block">Balance Due</span>
+                  <span className={`text-lg font-black ${statementTotalBalance > 0 ? "text-red-600" : "text-[#548235]"}`}>
+                    ${formatCurrency(statementTotalBalance)}
+                  </span>
+                </div>
+              </div>
+            )}
           </div>
 
           <div className="space-y-4">
@@ -1019,6 +1140,77 @@ function ReportModal({
                   })()
                 ) : (
                   <p className="text-gray-400 py-6 text-center">Please select a customer from the configuration bar above to view their profile sheet.</p>
+                )}
+              </div>
+            )}
+
+            {module === "customers" && reportSubtype === "statement" && (
+              <div>
+                <div className="flex justify-between items-center mb-3">
+                  <h3 className="font-bold text-lg text-gray-800">
+                    Customer Statement{statementCustomerName ? `: ${statementCustomerName}` : ""}
+                  </h3>
+                  <span className="text-xs text-gray-500 font-semibold">
+                    Date Range: {startDate} to {endDate}
+                  </span>
+                </div>
+
+                {!selectedCustomerId ? (
+                  <div className="text-center py-6 text-gray-400">
+                    Please select a customer to generate their statement.
+                  </div>
+                ) : (
+                  <>
+                    <table className="w-full border-collapse text-left text-sm">
+                      <thead>
+                        <tr className="border-b border-gray-300 text-gray-700">
+                          <th className="py-2 font-bold">Date</th>
+                          <th className="py-2 font-bold">Type</th>
+                          <th className="py-2 font-bold">Description</th>
+                          <th className="py-2 font-bold text-right">Charge (Sale)</th>
+                          <th className="py-2 font-bold text-right">Credit (Payment)</th>
+                          <th className="py-2 font-bold text-right">Balance</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {statementTransactions.length === 0 ? (
+                          <tr>
+                            <td colSpan={6} className="text-center py-6 text-gray-400">
+                              No transactions found for the selected date range.
+                            </td>
+                          </tr>
+                        ) : (
+                          statementTransactions.map((t: any, idx: number) => (
+                            <tr key={idx} className="border-b border-gray-100 align-top">
+                              <td className="py-2 text-gray-800">{t.date || "-"}</td>
+                              <td className="py-2 font-semibold text-gray-900">{t.type}</td>
+                              <td className="py-2 text-xs text-gray-700">{t.description}</td>
+                              <td className="py-2 text-right text-gray-800">{t.charge > 0 ? `$${formatCurrency(t.charge)}` : "-"}</td>
+                              <td className="py-2 text-right text-[#548235]">{t.credit > 0 ? `$${formatCurrency(t.credit)}` : "-"}</td>
+                              <td className="py-2 text-right font-bold text-gray-900">${formatCurrency(t.runningBalance)}</td>
+                            </tr>
+                          ))
+                        )}
+                      </tbody>
+                    </table>
+
+                    <div className="flex justify-end gap-6 mt-6 pt-4 border-t border-gray-200">
+                      <div className="text-right">
+                        <span className="text-xs font-bold uppercase tracking-wider text-gray-500 block">Total Sales</span>
+                        <span className="text-xl font-black text-[#548235]">${formatCurrency(statementTotalSales)}</span>
+                      </div>
+                      <div className="text-right">
+                        <span className="text-xs font-bold uppercase tracking-wider text-gray-500 block">Total Payments</span>
+                        <span className="text-xl font-black text-[#548235]">${formatCurrency(statementTotalPayments)}</span>
+                      </div>
+                      <div className="text-right">
+                        <span className="text-xs font-bold uppercase tracking-wider text-gray-500 block">Balance Due</span>
+                        <span className={`text-xl font-black ${statementTotalBalance > 0 ? "text-red-600" : "text-[#548235]"}`}>
+                          ${formatCurrency(statementTotalBalance)}
+                        </span>
+                      </div>
+                    </div>
+                  </>
                 )}
               </div>
             )}
@@ -1452,4 +1644,4 @@ function ReportModal({
       </div>
     </div>
   );
-}
+}
